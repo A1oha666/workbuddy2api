@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>workbuddy2api 看板</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d2129; --line:#272c36;
+    --fg:#e6e9ef; --dim:#8b93a5; --accent:#4c8dff; --ok:#3ecf8e;
+    --warn:#ffb454; --err:#ff5f6d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    padding:14px 18px;border-bottom:1px solid var(--line);background:var(--panel);
+    position:sticky;top:0;z-index:10}
+  h1{font-size:14px;margin:0;font-weight:600;letter-spacing:.3px}
+  .spacer{flex:1}
+  button{background:var(--accent);color:#fff;border:0;border-radius:6px;
+    padding:7px 14px;font:inherit;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--dim);font-weight:400}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);display:inline-block}
+  .dot.off{background:var(--err)}
+  .muted{color:var(--dim)}
+  main{padding:16px 18px 60px;max-width:1400px;margin:0 auto}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+  .card .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+  .card .v{font-size:22px;font-weight:600;margin-top:4px}
+  .card .v small{font-size:12px;color:var(--dim);font-weight:400}
+  h2{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.8px;
+    margin:22px 0 8px;font-weight:600}
+  table{width:100%;border-collapse:collapse;background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{background:var(--panel2);color:var(--dim);font-size:11px;
+    text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  /* 数字列：表头与单元格统一右对齐 + 等宽数字，保证纵向对齐 */
+  th.num,td.num{text-align:right;font-variant-numeric:tabular-nums}
+  /* 空状态行：跨列居中提示，不受列对齐影响 */
+  td.empty{text-align:center;padding:22px;color:var(--dim)}
+  tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:var(--panel2)}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)} .dim{color:var(--dim)}
+  .badge{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600}
+  .badge.healthy{background:rgba(62,207,142,.15);color:var(--ok)}
+  .badge.cooling{background:rgba(255,180,84,.15);color:var(--warn)}
+  .badge.disabled{background:rgba(255,95,109,.15);color:var(--err)}
+  .bar{height:5px;background:var(--line);border-radius:3px;overflow:hidden;min-width:70px}
+  .bar i{display:block;height:100%;background:var(--accent)}
+  .toast{position:fixed;bottom:18px;right:18px;background:var(--panel2);
+    border:1px solid var(--line);border-left:3px solid var(--accent);
+    padding:10px 16px;border-radius:6px;opacity:0;transition:opacity .25s;pointer-events:none}
+  .toast.show{opacity:1}
+  .toast.ok{border-left-color:var(--ok)} .toast.err{border-left-color:var(--err)}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="live"></span>
+  <h1>workbuddy2api 看板</h1>
+  <span class="muted" id="clock">--:--:--</span>
+  <span class="spacer"></span>
+  <button id="checkin">签到 + 刷新</button>
+  <button class="ghost" id="refresh">刷新</button>
+  <button class="ghost" id="pause">暂停</button>
+</header>
+
+<main>
+  <div class="cards">
+    <div class="card"><div class="k">请求总数</div><div class="v" id="s-total">0</div></div>
+    <div class="card"><div class="k">成功率</div><div class="v" id="s-rate">-</div></div>
+    <div class="card"><div class="k">累计输出 Token</div><div class="v" id="s-tokens">0</div></div>
+    <div class="card"><div class="k">整体 tok/s</div><div class="v" id="s-tokps">0.0</div></div>
+    <div class="card"><div class="k">近窗平均 tok/s</div><div class="v" id="s-avgtokps">0.0</div></div>
+    <div class="card"><div class="k">账号池</div><div class="v" id="s-pool">-</div></div>
+  </div>
+
+  <h2>请求记录（最新在前，最多 500 条）</h2>
+  <table>
+    <thead><tr>
+      <th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th><th>UID</th>
+      <th class="num">TTFB</th><th class="num">Token</th><th class="num">tok/s</th><th class="num">耗时</th>
+    </tr></thead>
+    <tbody id="tb-req"><tr><td colspan="10" class="empty">等待请求…</td></tr></tbody>
+  </table>
+
+  <h2>按模型聚合</h2>
+  <table>
+    <thead><tr>
+      <th>模型</th><th class="num">请求</th><th class="num">Token</th>
+      <th class="num">tok/s</th><th class="num">平均 TTFB</th><th class="num">错误</th>
+    </tr></thead>
+    <tbody id="tb-model"><tr><td colspan="6" class="empty">暂无数据</td></tr></tbody>
+  </table>
+
+  <h2>账号池</h2>
+  <table>
+    <thead><tr>
+      <th>UID</th><th>昵称</th><th>状态</th><th class="num">积分</th>
+      <th>积分占比</th><th class="num">成功</th><th class="num">错误</th><th>备注</th>
+    </tr></thead>
+    <tbody id="tb-pool"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+  </table>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let paused = false, timer = null;
+const MAX_CREDITS = 2000; // 积分进度条基准（超出按满格显示）
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function toast(msg, kind){
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (kind || '');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.className = 'toast ' + (kind || ''); }, 3000);
+}
+
+function fmt(n){ return (n ?? 0).toLocaleString('en-US'); }
+function num(n, d){ return Number(n ?? 0).toFixed(d ?? 1); }
+
+function statusClass(s){
+  if (s >= 200 && s < 300) return 'ok';
+  if (s >= 400 && s < 500) return 'warn';
+  return 'err';
+}
+
+async function load(){
+  try{
+    const r = await fetch('/stats', {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    renderSummary(d.summary);
+    renderReqs(d.recent);
+    renderModels(d.models);
+    renderPool(d.pool);
+    $('live').className = 'dot';
+    $('clock').textContent = d.now || '';
+  }catch(e){
+    $('live').className = 'dot off';
+    $('clock').textContent = '连接失败';
+  }
+}
+
+function renderSummary(s){
+  s = s || {};
+  $('s-total').textContent  = fmt(s.total);
+  $('s-tokens').textContent = fmt(s.tokens);
+  $('s-tokps').textContent  = num(s.tok_per_s);
+  $('s-avgtokps').textContent = num(s.avg_tok_ps);
+  const rate = s.total ? (s.ok / s.total * 100) : null;
+  $('s-rate').innerHTML = rate === null ? '-' :
+    `<span class="${rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'}">${num(rate)}%</span>`;
+}
+
+function renderReqs(rows){
+  const tb = $('tb-req');
+  if(!rows || !rows.length){ tb.innerHTML = '<tr><td colspan="10" class="empty">等待请求…</td></tr>'; return; }
+  tb.innerHTML = rows.map(r => {
+    const tok = r.tokens_ok ? fmt(r.tokens) : '<span class="dim">-</span>';
+    const tps = (r.tokens_ok && r.tok_per_s > 0) ? num(r.tok_per_s) : '<span class="dim">-</span>';
+    const ttfb = r.ttfb_ms > 0 ? Math.round(r.ttfb_ms) + 'ms' : '<span class="dim">-</span>';
+    return `<tr>
+      <td class="dim">${r.seq}</td>
+      <td class="dim">${esc(r.time)}</td>
+      <td>${esc(r.model)}</td>
+      <td class="dim">${esc(r.mode)}</td>
+      <td class="${statusClass(r.status)}">${r.status}</td>
+      <td class="dim">${esc(r.uid)}</td>
+      <td class="num">${ttfb}</td>
+      <td class="num">${tok}</td>
+      <td class="num">${tps}</td>
+      <td class="num dim">${num(r.total_ms / 1000)}s</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderModels(rows){
+  const tb = $('tb-model');
+  if(!rows || !rows.length){ tb.innerHTML = '<tr><td colspan="6" class="empty">暂无数据</td></tr>'; return; }
+  rows.sort((a,b) => b.tokens - a.tokens);
+  tb.innerHTML = rows.map(m => `<tr>
+    <td>${esc(m.model)}</td>
+    <td class="num">${fmt(m.reqs)}</td>
+    <td class="num">${fmt(m.tokens)}</td>
+    <td class="num ok">${num(m.tok_per_s)}</td>
+    <td class="num dim">${Math.round(m.avg_ttfb_ms || 0)}ms</td>
+    <td class="num ${m.errors ? 'err' : 'dim'}">${fmt(m.errors)}</td>
+  </tr>`).join('');
+}
+
+function renderPool(p){
+  const tb = $('tb-pool');
+  if(!p || !p.accounts || !p.accounts.length){
+    tb.innerHTML = '<tr><td colspan="8" class="empty">无账号</td></tr>';
+    $('s-pool').innerHTML = '0';
+    return;
+  }
+  $('s-pool').innerHTML =
+    `<span class="ok">${p.healthy}</span><small> / ${p.total}${p.cooling ? ' · 冷却 ' + p.cooling : ''}${p.disabled ? ' · 禁用 ' + p.disabled : ''}</small>`;
+
+  tb.innerHTML = p.accounts.map(a => {
+    const st = a.disabled ? 'disabled' : (a.cooling ? 'cooling' : 'healthy');
+    const label = a.disabled ? '禁用' : (a.cooling ? '冷却' : '正常');
+    const pct = Math.min(100, (a.credits || 0) / MAX_CREDITS * 100);
+    let note = a.reason || '';
+    if (a.cooling && a.cool_remaining_sec) {
+      const m = Math.ceil(a.cool_remaining_sec / 60);
+      note = `剩余 ~${m} 分钟` + (a.reason ? ' · ' + a.reason : '');
+    }
+    return `<tr>
+      <td class="dim">${esc((a.uid || '').slice(0,8))}</td>
+      <td>${esc(a.nickname || '-')}</td>
+      <td><span class="badge ${st}">${label}</span></td>
+      <td class="num">${fmt(a.credits)}</td>
+      <td><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div></td>
+      <td class="num ok">${fmt(a.success_count)}</td>
+      <td class="num ${a.err_count ? 'err' : 'dim'}">${fmt(a.err_count)}</td>
+      <td class="dim">${esc(note)}</td>
+    </tr>`;
+  }).join('');
+}
+
+$('checkin').onclick = async () => {
+  const btn = $('checkin');
+  btn.disabled = true;
+  btn.textContent = '签到中…';
+  toast('正在签到，请稍候…');
+  try{
+    const r = await fetch('/checkin', {method:'POST'});
+    const d = await r.json().catch(() => ({}));
+    if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    toast(d.msg || '签到完成', 'ok');
+    await load();
+  }catch(e){
+    toast('签到失败：' + e.message, 'err');
+  }finally{
+    btn.disabled = false;
+    btn.textContent = '签到 + 刷新';
+  }
+};
+
+$('refresh').onclick = load;
+
+$('pause').onclick = () => {
+  paused = !paused;
+  $('pause').textContent = paused ? '继续' : '暂停';
+  if(paused){ clearInterval(timer); timer = null; }
+  else { startTimer(); }
+};
+
+function startTimer(){
+  clearInterval(timer);
+  timer = setInterval(() => { if(!paused) load(); }, 2000);
+}
+
+load();
+startTimer();
+</script>
+</body>
+</html>

@@ -143,6 +143,12 @@ func main() {
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
+		// 看板按钮手动签到；并发防护由 scheduler.CheckinAll 内部 checkinMu 负责
+		// （重复调用返回 ErrBusy，与定时任务撞车也不会重复打上游）。
+		CheckinFunc: func() {
+			log.Printf("manual checkin triggered from dashboard")
+			sch.RunCheckinNow()
+		},
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

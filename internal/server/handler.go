@@ -43,6 +43,9 @@ type Config struct {
 	PromptMode string
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
+
+	// CheckinFunc 手动触发一次批量签到（看板按钮）。nil = 禁用该按钮。
+	CheckinFunc func()
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -85,6 +88,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 本地看板：无鉴权，仅建议监听 127.0.0.1 时使用。
+	h.mux.HandleFunc("GET /stats", h.stats)
+	h.mux.HandleFunc("POST /checkin", h.checkin)
+	h.mux.HandleFunc("GET /", h.dashboard)
 	return h
 }
 
@@ -123,6 +130,19 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.poolSnapshot())
+}
+
+// stats 返回请求统计 + 账号池快照（看板数据源，无鉴权）。
+func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
+	out := stats.snapshot()
+	out["pool"] = h.poolSnapshot()
+	out["checkin_enabled"] = h.cfg.CheckinFunc != nil
+	writeJSON(w, http.StatusOK, out)
+}
+
+// poolSnapshot 返回账号池快照（/status 与 /stats 共用）。
+func (h *Handler) poolSnapshot() map[string]any {
 	total, healthy, cooling, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
 	sticky := 0
 	if h.cfg.StickyCount != nil {
@@ -132,7 +152,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	if redisMode == "" {
 		redisMode = "noop"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"accounts":        h.cfg.Pool.List(),
 		"total":           total,
 		"healthy":         healthy,
@@ -141,7 +161,17 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"in_flight_full":  inFlightFull,
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
-	})
+	}
+}
+
+// checkin 手动触发批量签到；未注入 CheckinFunc 时返回 501。
+func (h *Handler) checkin(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.CheckinFunc == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "checkin not configured"})
+		return
+	}
+	h.cfg.CheckinFunc()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": "签到完成，账号池已刷新"})
 }
 
 // 静态 CN 模型表（api-reference §5，动态接口失败时的回退）。

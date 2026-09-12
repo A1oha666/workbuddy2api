@@ -41,13 +41,36 @@ func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
 }
 
-// done 幂等落一行表格日志。
+// done 幂等落一行表格日志，并把记录写入内存统计环形缓冲（看板数据源）。
 func (s *chatStat) done() {
 	if s.logged {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.status, s.toks)
+	total := time.Since(s.start)
+	logChatRow(s.ttfb, total, s.model, s.mode, s.uid, s.status, s.toks)
+	recordChatStat(s.ttfb, total, s.model, s.mode, s.uid, s.status, s.toks)
+}
+
+// recordChatStat 把一次请求转成 reqRecord 写入全局 stats。
+func recordChatStat(ttfb, total time.Duration, model, mode, uid string, status int, toks int) {
+	r := reqRecord{
+		Time:     time.Now().Format("15:04:05"),
+		Model:    model,
+		Mode:     mode,
+		Status:   status,
+		UID:      uidPrefix(uid),
+		TTFBMs:   float64(ttfb.Microseconds()) / 1000,
+		Tokens:   toks,
+		TokensOK: toks >= 0,
+		TotalMs:  float64(total.Microseconds()) / 1000,
+		OK:       status >= 200 && status < 300,
+	}
+	gen := r.TotalMs - r.TTFBMs
+	if toks >= 0 && gen > 0 {
+		r.TokPerS = float64(toks) / (gen / 1000)
+	}
+	stats.add(r)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
