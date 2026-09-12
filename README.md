@@ -155,10 +155,11 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `server.max_body_mb` | `8` | 聊天请求体大小上限（MB，0 / 负数启动报错）。超限直接返回 **413 `request_body_too_large`**，不再把半截请求喂给上游 |
 | `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
-| `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
-| `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进猫猫旅行状态机（领养 / 派出 / 领奖） |
-| `schedule.activity_hours` | `[10]` | 每日本地时区整点对话活跃上报（点亮连登 + 解锁 `first_buddy`） |
-| `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
+| `schedule.checkin_hours` | `[9, 21]` | 每日 UTC+8 整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
+| `schedule.travel_hours` | `[9, 21]` | 每日 UTC+8 整点推进猫猫旅行状态机（领养 / 派出 / 领奖） |
+| `schedule.activity_hours` | `[10]` | 每日 UTC+8 整点对话活跃上报（点亮连登 + 解锁 `first_buddy`） |
+| `schedule.keepalive_hours` | `[22]` | 每日 UTC+8 整点刷新 token 保活 |
+| `schedule.catch_up_enabled` | `true` | 启动补跑开关。`true`（默认）= 开机/启动时当天未跑的任务立即补跑一次。详见[定时任务](#定时任务) |
 | `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
 | `schedule.activity_enabled` | `true` | 活跃上报总开关 |
@@ -265,14 +266,29 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ### 定时任务
 
-四类任务各自独立排程、各有开关，互不影响。容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
+四类任务各自独立排程、各有开关，互不影响。**整点与"当天"一律按 UTC+8（Asia/Shanghai）判定**，与容器 `TZ` 无关（与上游每日重置对齐）。
 
 | 任务 | 开关（默认 true） | 时刻（默认） | 行为 |
 |---|---|---|---|
 | 签到 | `schedule.checkin_enabled` | `checkin_hours` `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号 |
-| 活跃上报 | `schedule.activity_enabled` | `activity_hours` `[10]` 整点 | 对话活跃上报（`chat_request_send` 事件，必须含 `userId`）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
+| 活跃上报 | `schedule.activity_enabled` | `activity_hours` `[10]` 整点 | 对话活跃上报（`chat_request_send` 事件，必须含 `userId`）；点亮连登 + 解锁 `first_buddy` |
 | 猫猫旅行 | `schedule.travel_enabled` | `travel_hours` `[9, 21]` 整点 | 独立排程：无猫领养 / `idle` 派出 / `arrived` 领奖 |
 | 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
+
+#### 每天只跑一次 + 开机补跑
+
+每个任务**按 UTC+8 自然日至多执行一次**（不是"每个整点各跑一次"）。三个入口共用同一份"当天是否已跑"判定，谁先到谁跑：
+
+1. **启动补跑**（默认开）：服务启动时，当天还没跑过的任务**立即执行一次**——不看到没到整点
+2. **定时到点**：当天已跑过 → 跳过；没跑过（比如启动时断网失败了）→ 执行
+3. **手动触发**：`POST /checkin` 看板按钮，同样按当天去重，重复点不会重复打上游
+
+这意味着：**开机就优先跑一遍**（网关常随用户开机才启动，整点时点极易错过），定时器退化为当天补漏的兜底。
+
+- 执行状态落在 `data/schedule_state.json`（与 `state_file` 同目录），记录每个任务最近执行的自然日；重启不丢，跨日自动重置
+- 文件缺失/损坏按"没跑过"处理（宁可多跑一次幂等任务，也不静默漏跑）
+- 关闭补跑：`schedule.catch_up_enabled: false`（退回纯定时，错过的时点不补）
+- 日志：`[scheduler] catch-up: <task> 未跑（<date> CST）→ 启动补跑`、`[scheduler] <task> 当日（<date> CST）已跑过，跳过`
 
 **关闭定时任务**：用 `schedule.*_enabled: false` 显式关闭（四个都设 `false` 则调度器不空转，直接阻塞等待退出信号）。注意两点语义：
 

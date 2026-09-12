@@ -31,6 +31,13 @@ type Config struct {
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int
 
+	// RunStatePath 运行状态文件路径（data/schedule_state.json）：记录各任务最近执行的
+	// CST 自然日，供「开机补跑 / 定时到点 / 手动触发」三入口共用去重。
+	// 空 = 不落盘（仅进程内去重，重启后失效）。
+	RunStatePath string
+	// CatchUpDisabled 关闭启动补跑（默认 false = 启动时按需补跑一次）。
+	CatchUpDisabled bool
+
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
 	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
 	CheckinDisabled bool
@@ -53,6 +60,13 @@ type Scheduler struct {
 
 	// checkinMu 串行化签到：定时入口与手动触发互斥，避免同一时刻重复打上游签到接口。
 	checkinMu sync.Mutex
+
+	// runMu 串行化「当天是否已跑」的检查+执行+记录，三入口共用。
+	// 防止定时到点与手动触发同时通过检查而重复打上游；不替代 checkinMu（签到在方法内另有互斥）。
+	runMu sync.Mutex
+
+	// state 任务执行日记录：三入口（补跑/定时/手动）共用的"当天是否已跑"判定。
+	state *runState
 }
 
 // New 构建。
@@ -73,7 +87,7 @@ func New(cfg Config) *Scheduler {
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
 	}
-	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string)}
+	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string), state: newRunState(cfg.RunStatePath)}
 }
 
 // checkinRefreshSkew 签到前判定"token 是否临近过期"的时间窗口（10 分钟）。
@@ -92,21 +106,23 @@ const (
 
 // CheckinOutcome 单账号签到结果（供手动签到回执与日志汇总）。
 type CheckinOutcome struct {
-	UID      string         `json:"uid"`
-	Nickname string         `json:"nickname,omitempty"`
-	Status   CheckinStatus  `json:"status"`
-	Credits  *int64         `json:"credits,omitempty"` // 签到后余额（余额查询成功才有值）
-	Detail   string         `json:"detail,omitempty"`  // 失败/跳过原因（"已签到"不填）
+	UID      string        `json:"uid"`
+	Nickname string        `json:"nickname,omitempty"`
+	Status   CheckinStatus `json:"status"`
+	Credits  *int64        `json:"credits,omitempty"` // 签到后余额（余额查询成功才有值）
+	Detail   string        `json:"detail,omitempty"`  // 失败/跳过原因（"已签到"不填）
 }
 
 // ErrBusy 已有一次签到正在执行（手动入口与定时撞车）。
 var ErrBusy = errors.New("checkin already running")
 
-// nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
+// nextFire 返回 now 之后最近的一个整点触发时间（CST，UTC+8）；hours 为 CST 小时（0-23）。
+// 统一用 CST 而非主机时区：与上游每日重置（00:00 CST）对齐，换机器/换 TZ 行为不变。
 func nextFire(now time.Time, hours []int) time.Time {
+	n := now.In(cstZone)
 	var earliest time.Time
 	for _, h := range hours {
-		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
+		t := time.Date(n.Year(), n.Month(), n.Day(), h, 0, 0, 0, cstZone)
 		if !t.After(now) {
 			t = t.Add(24 * time.Hour)
 		}
@@ -169,8 +185,103 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	return earliest, kinds
 }
 
+// allTasks 判定与补跑的固定遍历顺序：签到先跑（顺带刷新 token），后续任务用新鲜凭证。
+var allTasks = []taskKind{taskCheckin, taskTravel, taskActivity, taskKeepalive}
+
+// hoursFor 返回任务的小时配置与禁用标志。
+func (s *Scheduler) hoursFor(k taskKind) ([]int, bool) {
+	switch k {
+	case taskCheckin:
+		return s.cfg.CheckinHours, s.cfg.CheckinDisabled
+	case taskTravel:
+		return s.cfg.TravelHours, s.cfg.TravelDisabled
+	case taskActivity:
+		return s.cfg.ActivityHours, s.cfg.ActivityDisabled
+	case taskKeepalive:
+		return s.cfg.KeepaliveHours, s.cfg.KeepaliveDisabled
+	}
+	return nil, true
+}
+
+// dispatch 纯执行任务（不含任何去重判定）。
+func (s *Scheduler) dispatch(k taskKind) {
+	switch k {
+	case taskCheckin:
+		s.RunCheckinNow()
+	case taskTravel:
+		s.RunTravelNow()
+	case taskActivity:
+		s.RunActivityNow()
+	case taskKeepalive:
+		s.RunKeepaliveNow()
+	}
+}
+
+// runIfNotToday 按「当天（CST 自然日）是否已跑」决定是否执行任务，执行后记录当天。
+// 补跑 / 定时到点 / 手动触发三入口共用本方法：谁先到谁跑，其余当日幂等跳过。
+// ran=false 表示该任务已禁用，或当天已跑过。
+//
+// 全程持 runMu：check→dispatch→mark 原子化，防止定时到点与手动触发同时通过检查
+// 而重复打上游（签到另有 checkinMu，其余三类无自身互斥）。
+func (s *Scheduler) runIfNotToday(k taskKind) (ran bool) {
+	_, disabled := s.hoursFor(k)
+	if disabled {
+		return false
+	}
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+
+	day := travelDay(time.Now()) // 与上游每日重置同口径：CST 自然日
+	if s.state != nil && s.state.ranOn(k, day) {
+		return false
+	}
+	s.dispatch(k)
+	if s.state != nil {
+		if err := s.state.markDay(k, day); err != nil {
+			log.Printf("ERR: [scheduler] %s 记录运行状态失败: %v", taskKey(k), err)
+		}
+	}
+	return true
+}
+
+// CatchUp 启动补跑：对每个启用任务，当天（CST）还没跑过就立即跑一次。
+// 不看到没到整点——开机就优先补齐，定时器退化为当天补漏的兜底（方案乙）。
+// 已跑过的任务原地跳过（不产生上游请求）。
+func (s *Scheduler) CatchUp() {
+	if s.cfg.CatchUpDisabled {
+		return
+	}
+	if s.cfg.Pool == nil {
+		return // 无账号池（测试/工具构造）：无可补跑对象
+	}
+	day := travelDay(time.Now())
+	var ranList, skippedList []string
+	for _, k := range allTasks {
+		if _, disabled := s.hoursFor(k); disabled {
+			continue
+		}
+		if s.runIfNotToday(k) {
+			ranList = append(ranList, taskKey(k))
+			log.Printf("[scheduler] catch-up: %s 未跑（%s CST）→ 启动补跑", taskKey(k), day)
+		} else {
+			skippedList = append(skippedList, taskKey(k))
+		}
+	}
+	if len(ranList) == 0 && len(skippedList) == 0 {
+		return // 四类任务全禁用：不打无意义的空日志
+	}
+	log.Printf("[scheduler] startup catch-up 完成（%s CST）：补跑=%v 当日已跑=%v", day, ranList, skippedList)
+}
+
+// TriggerCheckin 手动触发签到（看板按钮）：走与定时/补跑同一份「当天已跑」判定。
+// 返回 false 表示当天已跑过，未重复打上游。
+func (s *Scheduler) TriggerCheckin() bool {
+	return s.runIfNotToday(taskCheckin)
+}
+
 // Run 主循环，阻塞直到 ctx 取消。
 func (s *Scheduler) Run(ctx context.Context) {
+	s.CatchUp() // 启动补跑：开机即优先补齐当天未跑的任务
 	for {
 		next, kinds := s.nextWake(time.Now())
 		if next.IsZero() {
@@ -185,16 +296,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 			// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
+			// 每个任务先过「当天是否已跑」判定：启动补跑已跑过的这里会跳过。
 			for _, k := range kinds {
-				switch k {
-				case taskCheckin:
-					s.RunCheckinNow()
-				case taskTravel:
-					s.RunTravelNow()
-				case taskActivity:
-					s.RunActivityNow()
-				case taskKeepalive:
-					s.RunKeepaliveNow()
+				if !s.runIfNotToday(k) {
+					log.Printf("[scheduler] %s 当日（%s CST）已跑过，跳过", taskKey(k), travelDay(time.Now()))
 				}
 			}
 		}

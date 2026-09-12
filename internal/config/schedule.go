@@ -33,6 +33,11 @@ type Schedule struct {
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
+	// CatchUpEnabled 启动补跑开关（缺省 true = 开机/启动时当天未跑的任务立即补跑一次）。
+	// 网关常随用户开机才启动，整点时点（09/21 签到等）极易错过；补跑把当天错过的任务补齐。
+	// 显式 false 则退回纯定时（错过的时点不补）。
+	// 命名与上面四个开关一致（*_enabled 缺省 true），由 DefaultSchedule 置位。
+	CatchUpEnabled bool `json:"catch_up_enabled"`
 	// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
 	// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 }
@@ -47,12 +52,13 @@ func DefaultSchedule() Schedule {
 		CheckinHours:        []int{9, 21},
 		TravelHours:         []int{9, 21},
 		ActivityHours:       []int{10},
-		KeepaliveHours:       []int{22},
+		KeepaliveHours:      []int{22},
 		CheckinEnabled:      true,
 		TravelEnabled:       true,
 		ActivityEnabled:     true,
 		KeepaliveEnabled:    true,
-		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		CatchUpEnabled:      true, // 缺省补跑：开机即优先补齐当天未跑的任务
+		ActivityReportCount: 5,    // 领猫前置需 5 次对话，5 连发刷满 chat_5
 	}
 }
 

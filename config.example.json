@@ -18,7 +18,8 @@
     "checkin_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,
-    "keepalive_enabled": true
+    "keepalive_enabled": true,
+    "catch_up_enabled": true
   },
   "upstream": {
     "timeout_seconds": 120,

@@ -17,7 +17,7 @@ import (
 )
 
 func TestNextFire(t *testing.T) {
-	loc := time.Local
+	loc := cstZone
 	now := time.Date(2026, 7, 27, 10, 0, 0, 0, loc)
 	next := nextFire(now, []int{9, 21})
 	if next.Hour() != 21 || next.Day() != 27 {
@@ -36,7 +36,7 @@ func TestNextFire(t *testing.T) {
 }
 
 func TestNextFireMergesSchedules(t *testing.T) {
-	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.Local)
+	now := time.Date(2026, 7, 27, 20, 0, 0, 0, cstZone)
 	next := nextFire(now, []int{9, 21, 22})
 	if next.Hour() != 21 {
 		t.Errorf("next=%v want 21 (earliest of 21/22)", next)
@@ -47,8 +47,8 @@ func TestNextFireMergesSchedules(t *testing.T) {
 func TestNextWakeKeepaliveOnly(t *testing.T) {
 	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, cstZone))
+	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, cstZone); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskKeepalive {
@@ -66,8 +66,8 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 		TravelDisabled:   true,
 		ActivityDisabled: true,
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, cstZone))
+	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, cstZone); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if !hasKind(kinds, taskCheckin) || !hasKind(kinds, taskKeepalive) {
@@ -75,8 +75,8 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 	}
 
 	// 22 点过后下一次是次日 09:00，且只含签到（旅行/活跃已禁用）。
-	at, kinds = s.nextWake(time.Date(2026, 9, 11, 22, 30, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 12, 9, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds = s.nextWake(time.Date(2026, 9, 11, 22, 30, 0, 0, cstZone))
+	if want := time.Date(2026, 9, 12, 9, 0, 0, 0, cstZone); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskCheckin {
@@ -97,8 +97,8 @@ func TestNextWakeNothingScheduled(t *testing.T) {
 func TestNextWakeCheckinDisabled(t *testing.T) {
 	s := New(Config{CheckinDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, cstZone))
+	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, cstZone); !at.Equal(want) {
 		t.Errorf("next=%v want %v（不应再有 21 点签到）", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskKeepalive {
@@ -110,8 +110,8 @@ func TestNextWakeCheckinDisabled(t *testing.T) {
 func TestNextWakeKeepaliveDisabled(t *testing.T) {
 	s := New(Config{KeepaliveDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, cstZone))
+	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, cstZone); !at.Equal(want) {
 		t.Errorf("next=%v want %v（不应再有 22 点保活）", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskCheckin {

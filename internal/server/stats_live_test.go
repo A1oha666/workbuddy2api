@@ -99,11 +99,27 @@ func TestCheckinEndpointLive(t *testing.T) {
 
 	// 已注入：确认真的被触发
 	called := 0
-	h2 := NewHandler(Config{Pool: pool.New(""), CheckinFunc: func() { called++ }})
+	h2 := NewHandler(Config{Pool: pool.New(""), CheckinFunc: func() bool { called++; return true }})
 	rec2 := httptest.NewRecorder()
 	h2.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/checkin", nil))
 	if rec2.Code != 200 || called != 1 {
 		t.Fatalf("checkin: code=%d called=%d want 200/1", rec2.Code, called)
+	}
+
+	// 已跑过（CheckinFunc 返回 false）→ 200 且带 skipped 标记，不报错
+	called2 := 0
+	h3 := NewHandler(Config{Pool: pool.New(""), CheckinFunc: func() bool { called2++; return false }})
+	rec3b := httptest.NewRecorder()
+	h3.ServeHTTP(rec3b, httptest.NewRequest(http.MethodPost, "/checkin", nil))
+	if rec3b.Code != 200 || called2 != 1 {
+		t.Fatalf("checkin(already): code=%d called=%d want 200/1", rec3b.Code, called2)
+	}
+	var skippedBody map[string]any
+	if err := json.Unmarshal(rec3b.Body.Bytes(), &skippedBody); err != nil {
+		t.Fatalf("checkin(already) json: %v", err)
+	}
+	if skippedBody["skipped"] != true {
+		t.Fatalf("checkin(already) skipped=%v want true", skippedBody["skipped"])
 	}
 
 	// /stats 应上报 checkin_enabled

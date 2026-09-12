@@ -45,7 +45,8 @@ type Config struct {
 	PromptText string
 
 	// CheckinFunc 手动触发一次批量签到（看板按钮）。nil = 禁用该按钮。
-	CheckinFunc func()
+	// 返回 true 表示本次真的执行了；false 表示当天已跑过（与定时/补跑共用去重）。
+	CheckinFunc func() bool
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -165,12 +166,16 @@ func (h *Handler) poolSnapshot() map[string]any {
 }
 
 // checkin 手动触发批量签到；未注入 CheckinFunc 时返回 501。
+// 与定时任务/启动补跑共用「当天是否已跑」判定：已跑过则不重复打上游。
 func (h *Handler) checkin(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.CheckinFunc == nil {
 		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "checkin not configured"})
 		return
 	}
-	h.cfg.CheckinFunc()
+	if !h.cfg.CheckinFunc() {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "msg": "当天已签到过，已跳过"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": "签到完成，账号池已刷新"})
 }
 

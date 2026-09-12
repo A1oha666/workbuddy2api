@@ -21,6 +21,10 @@ func TestDefaultScheduleActivityCount(t *testing.T) {
 	if len(s.ActivityHours) != 1 || s.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want [10]", s.ActivityHours)
 	}
+	// 启动补跑缺省开启（enabled=true），保证「开机就优先跑一次」。
+	if !s.CatchUpEnabled {
+		t.Errorf("catch_up_enabled default must be true (catch-up enabled)")
+	}
 }
 
 // TestNormalizeScheduleThreeStates 缺省/显式 0/显式 N 三态默认值：
@@ -74,8 +78,8 @@ func TestNormalizeScheduleEmptyHoursFallback(t *testing.T) {
 // TestNormalizeScheduleInvalidHour 非法小时快速失败并指向正确开关。
 func TestNormalizeScheduleInvalidHour(t *testing.T) {
 	cases := []struct {
-		s           Schedule
-		wantSwitch  string
+		s          Schedule
+		wantSwitch string
 	}{
 		{Schedule{CheckinHours: []int{25}}, "checkin_enabled"},
 		{Schedule{CheckinHours: []int{-1}}, "checkin_enabled"},

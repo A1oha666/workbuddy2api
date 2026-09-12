@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -19,6 +20,16 @@ import (
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
+
+// scheduleStatePath 由 state_file 推导排程运行状态文件：同目录下的 schedule_state.json。
+// 这样本地（./data/）与容器（/app/data/）都能在同一挂载目录下持久化，无需另配路径。
+func scheduleStatePath(stateFile string) string {
+	dir := filepath.Dir(stateFile)
+	if dir == "" || dir == "." {
+		return "schedule_state.json"
+	}
+	return filepath.Join(dir, "schedule_state.json")
+}
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json")
@@ -107,6 +118,10 @@ func main() {
 		TravelDisabled:      !cfg.Schedule.TravelEnabled,
 		ActivityDisabled:    !cfg.Schedule.ActivityEnabled,
 		KeepaliveDisabled:   !cfg.Schedule.KeepaliveEnabled,
+		// 运行状态文件与 state.json 同目录（data/）：记录各任务当日是否已跑，
+		// 供启动补跑 / 定时到点 / 手动触发三入口去重。
+		RunStatePath:    scheduleStatePath(cfg.StateFile),
+		CatchUpDisabled: !cfg.Schedule.CatchUpEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -143,11 +158,16 @@ func main() {
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
-		// 看板按钮手动签到；并发防护由 scheduler.CheckinAll 内部 checkinMu 负责
-		// （重复调用返回 ErrBusy，与定时任务撞车也不会重复打上游）。
-		CheckinFunc: func() {
-			log.Printf("manual checkin triggered from dashboard")
-			sch.RunCheckinNow()
+		// 看板按钮手动签到；与定时/补跑共用「当天是否已跑」判定，
+		// 连点或与定时撞车都不会重复打上游（返回 false 即已跑过）。
+		CheckinFunc: func() bool {
+			ran := sch.TriggerCheckin()
+			if ran {
+				log.Printf("manual checkin triggered from dashboard")
+			} else {
+				log.Printf("manual checkin skipped: 当天已签到过")
+			}
+			return ran
 		},
 	})
 
